@@ -23,7 +23,7 @@ pub struct GameMetadata {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum ArtTab {
+pub enum ArtTab {
     Snapshot,
     Cabinet,
     Title,
@@ -301,7 +301,7 @@ fn launch_rom(rom: &str, rom_dirs: &[PathBuf], extra_dirs: &[PathBuf], mame_exec
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ---- Menu Bar ----
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
