@@ -9,27 +9,6 @@ use std::thread;
 use std::sync::mpsc;
 use rayon::prelude::*;
 
-#[derive(Clone, Debug)]
-pub struct MameExecutable {
-    pub name: String,           // Display name (e.g., "MAME 0.239")
-    pub path: String,           // Path to executable
-    pub version: String,        // Version string from MAME
-    pub total_games: usize,     // Total games this version supports
-    pub working_games: usize,   // Working games count
-}
-
-impl Default for MameExecutable {
-    fn default() -> Self {
-        Self {
-            name: "Default MAME".to_string(),
-            path: "mame".to_string(),
-            version: String::new(),
-            total_games: 0,
-            working_games: 0,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct GameMetadata {
     pub name: String,
@@ -72,8 +51,7 @@ pub struct FilterSettings {
 }
 
 pub struct MyApp {
-    pub mame_executables: Vec<MameExecutable>,  // Multiple MAME versions
-    pub selected_mame_index: usize,              // Currently selected MAME
+    pub mame_executable: String,
     pub rom_dirs: Vec<PathBuf>,
     pub extra_rom_dirs: Vec<PathBuf>,
     pub extra_asset_dirs: Vec<PathBuf>,
@@ -94,18 +72,11 @@ pub struct MyApp {
     pub total_games_count: usize,
     pub working_games_count: usize,
     pub mame_version: String,
-    pub show_context_menu: bool,
-    pub context_menu_position: egui::Pos2,
-    pub context_menu_rom: Option<String>,
-    pub game_preferred_mame: HashMap<String, usize>,  // Remember preferred MAME for each game
-    pub show_mame_manager: bool,  // Show MAME manager dialog
 }
 
 impl Default for MyApp {
     fn default() -> Self {
         Self {
-            mame_executables: vec![],
-            selected_mame_index: 0,
             rom_dirs: vec![],
             extra_rom_dirs: vec![],
             extra_asset_dirs: vec![],
@@ -116,6 +87,7 @@ impl Default for MyApp {
             selected_rom: None,
             screenshot: None,
             texture_handle: None,
+            mame_executable: "mame".to_string(),
             game_metadata: HashMap::new(),
             art_tab: ArtTab::Snapshot,
             art_texture: None,
@@ -130,11 +102,6 @@ impl Default for MyApp {
             total_games_count: 0,
             working_games_count: 0,
             mame_version: String::new(),
-            show_context_menu: false,
-            context_menu_position: egui::Pos2::ZERO,
-            context_menu_rom: None,
-            game_preferred_mame: HashMap::new(),
-            show_mame_manager: false,
         }
     }
 }
@@ -318,8 +285,8 @@ fn load_art_image(rom: &str, asset_dirs: &[PathBuf], art_type: &str) -> Option<C
     None
 }
 
-fn launch_rom_with_mame(rom: &str, rom_dirs: &[PathBuf], extra_dirs: &[PathBuf], mame_executable: &str) {
-    println!("Launching ROM: {} with MAME: {}", rom, mame_executable);
+fn launch_rom(rom: &str, rom_dirs: &[PathBuf], extra_dirs: &[PathBuf], mame_executable: &str) {
+    println!("Launching ROM: {}", rom);
     let all_dirs = rom_dirs.iter().chain(extra_dirs.iter());
     let separator = ";";
     let rom_paths = all_dirs
@@ -340,31 +307,27 @@ impl eframe::App for MyApp {
             egui::menu::bar(ui, |ui| {
                 // File Menu
                 ui.menu_button("File", |ui| {
-                    if ui.button("MAME Executables Manager...").clicked() {
-                        self.show_mame_manager = true;
-                        ui.close_menu();
-                    }
+                    if ui.button("Set MAME Executable...").clicked() {
+                        let file_dialog = if cfg!(target_os = "linux") {
+                            // On Linux, don't filter by extension
+                            rfd::FileDialog::new()
+                            .set_file_name("mame")
+                        } else if cfg!(target_os = "windows") {
+                            // On Windows, filter for .exe files
+                            rfd::FileDialog::new()
+                            .add_filter("Executable", &["exe"])
+                        } else {
+                            // On other platforms, allow any file
+                            rfd::FileDialog::new()
+                        };
 
-                    ui.separator();
-
-                    if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-
-                // Options Menu
-                ui.menu_button("Options", |ui| {
-                    ui.menu_button("Directories", |ui| {
-                        if ui.button("Add ROM Path...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                self.rom_dirs.push(path.clone());
-                                self.extra_rom_dirs.push(path); // Same path for ROMs, CHDs, and BIOS
-
-                                // Reload ROMs if we have at least one MAME configured
-                                if !self.mame_executables.is_empty() {
-                                    let mame_exec = &self.mame_executables[self.selected_mame_index];
-                                    self.mame_version = mame_exec.version.clone();
-                                    self.game_metadata = load_mame_metadata_parallel_with_exec(&mame_exec.path);
+                        if let Some(path) = file_dialog.pick_file() {
+                            if let Some(path_str) = path.to_str() {
+                                self.mame_executable = path_str.to_string();
+                                // Reload metadata with new executable
+                                if !self.rom_dirs.is_empty() {
+                                    self.mame_version = get_mame_version(&self.mame_executable);
+                                    self.game_metadata = load_mame_metadata_parallel_with_exec(&self.mame_executable);
                                     self.mame_titles = self.game_metadata.iter().map(|(k, v)| (k.clone(), v.description.clone())).collect();
 
                                     // Count total and working games
@@ -383,18 +346,57 @@ impl eframe::App for MyApp {
                                     manufacturers.sort();
                                     manufacturers.dedup();
                                     self.all_manufacturers = manufacturers;
-
-                                    let rom_dirs = self.rom_dirs.clone();
-                                    let mame_titles = self.mame_titles.clone();
-                                    let mame_executable = mame_exec.path.clone();
-                                    let (tx, rx) = mpsc::channel();
-                                    self.roms_tx = Some(rx);
-                                    self.roms_loading = true;
-                                    thread::spawn(move || {
-                                        let roms = collect_roms_from_dirs(&rom_dirs, &mame_executable, &mame_titles);
-                                        let _ = tx.send(roms);
-                                    });
                                 }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                // Options Menu
+                ui.menu_button("Options", |ui| {
+                    ui.menu_button("Directories", |ui| {
+                        if ui.button("Add ROM Path...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.rom_dirs.push(path.clone());
+                                self.extra_rom_dirs.push(path); // Same path for ROMs, CHDs, and BIOS
+                                self.mame_version = get_mame_version(&self.mame_executable);
+                                self.game_metadata = load_mame_metadata_parallel_with_exec(&self.mame_executable);
+                                self.mame_titles = self.game_metadata.iter().map(|(k, v)| (k.clone(), v.description.clone())).collect();
+
+                                // Count total and working games
+                                self.total_games_count = self.game_metadata.iter()
+                                .filter(|(_, meta)| !meta.is_device && !meta.is_bios)
+                                .count();
+                                self.working_games_count = self.game_metadata.iter()
+                                .filter(|(_, meta)| !meta.is_device && !meta.is_bios && !meta.is_mechanical && !meta.runnable)
+                                .count();
+
+                                // Extract unique manufacturers
+                                let mut manufacturers: Vec<String> = self.game_metadata.values()
+                                .map(|m| m.manufacturer.clone())
+                                .filter(|m| !m.is_empty())
+                                .collect();
+                                manufacturers.sort();
+                                manufacturers.dedup();
+                                self.all_manufacturers = manufacturers;
+
+                                let rom_dirs = self.rom_dirs.clone();
+                                let mame_titles = self.mame_titles.clone();
+                                let mame_executable = self.mame_executable.clone();
+                                let (tx, rx) = mpsc::channel();
+                                self.roms_tx = Some(rx);
+                                self.roms_loading = true;
+                                thread::spawn(move || {
+                                    let roms = collect_roms_from_dirs(&rom_dirs, &mame_executable, &mame_titles);
+                                    let _ = tx.send(roms);
+                                });
                             }
                             ui.close_menu();
                         }
@@ -433,146 +435,6 @@ impl eframe::App for MyApp {
             });
         });
 
-        // ---- MAME Manager Dialog ----
-        if self.show_mame_manager {
-            egui::Window::new("MAME Executables Manager")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(600.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.heading("Manage MAME Versions");
-                ui.separator();
-
-                // Add new MAME button
-                if ui.button("➕ Add MAME Executable").clicked() {
-                    let file_dialog = if cfg!(target_os = "linux") {
-                        rfd::FileDialog::new().set_file_name("mame")
-                    } else if cfg!(target_os = "windows") {
-                        rfd::FileDialog::new().add_filter("Executable", &["exe"])
-                    } else {
-                        rfd::FileDialog::new()
-                    };
-
-                    if let Some(path) = file_dialog.pick_file() {
-                        if let Some(path_str) = path.to_str() {
-                            let version = get_mame_version(path_str);
-                            let name = format!("MAME {}", version.split_whitespace().nth(1).unwrap_or("Unknown"));
-
-                            // Load metadata for this MAME
-                            let metadata = load_mame_metadata_parallel_with_exec(path_str);
-                            let total = metadata.iter()
-                            .filter(|(_, meta)| !meta.is_device && !meta.is_bios)
-                            .count();
-                            let working = metadata.iter()
-                            .filter(|(_, meta)| !meta.is_device && !meta.is_bios && !meta.is_mechanical && !meta.runnable)
-                            .count();
-
-                            self.mame_executables.push(MameExecutable {
-                                name,
-                                path: path_str.to_string(),
-                                                       version,
-                                                       total_games: total,
-                                                       working_games: working,
-                            });
-
-                            // If this is the first MAME, load its metadata
-                            if self.mame_executables.len() == 1 {
-                                self.selected_mame_index = 0;
-                                self.game_metadata = metadata;
-                                self.mame_titles = self.game_metadata.iter().map(|(k, v)| (k.clone(), v.description.clone())).collect();
-                                self.total_games_count = total;
-                                self.working_games_count = working;
-                                self.mame_version = self.mame_executables[0].version.clone();
-                            }
-                        }
-                    }
-                }
-
-                ui.separator();
-
-                // List existing MAME executables
-                if self.mame_executables.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(255, 200, 100),
-                                     "No MAME executables configured. Click 'Add MAME Executable' to add one.");
-                } else {
-                    ui.label("Configured MAME versions:");
-                    ui.add_space(10.0);
-
-                    let mut to_remove = None;
-                    let mut to_select = None;
-
-                    for (idx, mame) in self.mame_executables.iter().enumerate() {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                // Radio button for default selection
-                                if ui.radio(self.selected_mame_index == idx, &mame.name).clicked() {
-                                    to_select = Some(idx);
-                                }
-
-                                ui.separator();
-
-                                ui.vertical(|ui| {
-                                    ui.label(format!("Path: {}", mame.path));
-                                    ui.label(format!("Version: {}", mame.version));
-                                    ui.label(format!("Games: {} total, {} working", mame.total_games, mame.working_games));
-                                });
-
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("❌ Remove").clicked() {
-                                        to_remove = Some(idx);
-                                    }
-                                });
-                            });
-                        });
-                        ui.add_space(5.0);
-                    }
-
-                    // Handle removal
-                    if let Some(idx) = to_remove {
-                        self.mame_executables.remove(idx);
-                        if self.selected_mame_index >= self.mame_executables.len() && !self.mame_executables.is_empty() {
-                            self.selected_mame_index = self.mame_executables.len() - 1;
-                        }
-                    }
-
-                    // Handle selection change
-                    if let Some(idx) = to_select {
-                        self.selected_mame_index = idx;
-                        let mame = &self.mame_executables[idx];
-                        self.mame_version = mame.version.clone();
-
-                        // Reload metadata for the selected MAME
-                        self.game_metadata = load_mame_metadata_parallel_with_exec(&mame.path);
-                        self.mame_titles = self.game_metadata.iter().map(|(k, v)| (k.clone(), v.description.clone())).collect();
-                        self.total_games_count = mame.total_games;
-                        self.working_games_count = mame.working_games;
-
-                        // Reload ROMs if we have paths configured
-                        if !self.rom_dirs.is_empty() {
-                            let rom_dirs = self.rom_dirs.clone();
-                            let mame_titles = self.mame_titles.clone();
-                            let mame_executable = mame.path.clone();
-                            let (tx, rx) = mpsc::channel();
-                            self.roms_tx = Some(rx);
-                            self.roms_loading = true;
-                            thread::spawn(move || {
-                                let roms = collect_roms_from_dirs(&rom_dirs, &mame_executable, &mame_titles);
-                                let _ = tx.send(roms);
-                            });
-                        }
-                    }
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Close").clicked() {
-                        self.show_mame_manager = false;
-                    }
-                });
-            });
-        }
-
         // ---- About Dialog ----
         if self.show_about {
             egui::Window::new("About")
@@ -593,41 +455,12 @@ impl eframe::App for MyApp {
                     ui.add_space(10.0);
                     ui.label("Features:");
                     ui.label("• Multi-folder ROM management");
-                    ui.label("• Multiple MAME version support");
                     ui.label("• Game artwork display");
                     ui.label("• Advanced search and filtering");
                     ui.label("• MAME metadata integration");
                     ui.add_space(20.0);
                     if ui.button("Close").clicked() {
                         self.show_about = false;
-                    }
-                });
-            });
-        }
-
-        // ---- Context Menu ----
-        if self.show_context_menu {
-            egui::Area::new(egui::Id::new("context_menu"))
-            .fixed_pos(self.context_menu_position)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label("Launch with:");
-                    ui.separator();
-
-                    if let Some(rom) = &self.context_menu_rom {
-                        for (idx, mame) in self.mame_executables.iter().enumerate() {
-                            if ui.button(&mame.name).clicked() {
-                                launch_rom_with_mame(rom, &self.rom_dirs, &self.extra_rom_dirs, &mame.path);
-                                self.game_preferred_mame.insert(rom.clone(), idx);
-                                self.show_context_menu = false;
-                            }
-                        }
-
-                        ui.separator();
-
-                        if ui.button("Cancel").clicked() {
-                            self.show_context_menu = false;
-                        }
                     }
                 });
             });
@@ -699,14 +532,6 @@ impl eframe::App for MyApp {
                     ui.label(format!("Year: {}", meta.year));
                     ui.label(format!("Manufacturer: {}", meta.manufacturer));
                     ui.label(format!("Controls: {}", meta.controls));
-
-                    // Show preferred MAME version if set
-                    if let Some(pref_idx) = self.game_preferred_mame.get(selected_rom) {
-                        if let Some(mame) = self.mame_executables.get(*pref_idx) {
-                            ui.separator();
-                            ui.label(format!("Preferred MAME: {}", mame.name));
-                        }
-                    }
                 }
             } else {
                 ui.label("Select a game to see details.");
@@ -717,23 +542,11 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Rust MAME Launcher");
 
-            // Show current MAME executable(s)
+            // Show current MAME executable
             ui.horizontal(|ui| {
-                if self.mame_executables.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(255, 200, 100),
-                                     "No MAME executables configured. Use File → MAME Executables Manager to add MAME versions.");
-                } else {
-                    ui.label("Active MAME:");
-                    if let Some(current_mame) = self.mame_executables.get(self.selected_mame_index) {
-                        ui.label(&current_mame.name);
-                        ui.small_button("📁").on_hover_text("Manage in File menu");
-
-                        if self.mame_executables.len() > 1 {
-                            ui.separator();
-                            ui.label(format!("({} versions configured)", self.mame_executables.len()));
-                        }
-                    }
-                }
+                ui.label("MAME Executable:");
+                ui.label(&self.mame_executable);
+                ui.small_button("📁").on_hover_text("Change in File menu");
             });
 
             if !self.rom_dirs.is_empty() || !self.extra_asset_dirs.is_empty() {
@@ -756,7 +569,7 @@ impl eframe::App for MyApp {
                         }
                     }
                 });
-            } else if !self.mame_executables.is_empty() {
+            } else {
                 ui.colored_label(egui::Color32::from_rgb(255, 200, 100),
                                  "No paths configured. Use Options → Directories to add paths.");
             }
@@ -1191,38 +1004,15 @@ impl eframe::App for MyApp {
 
                                                            ui.horizontal(|ui| {
                                                                let response = ui.add_sized([400.0, row_height], egui::SelectableLabel::new(is_selected, clean_title));
-
                                                                if response.clicked() {
                                                                    self.selected_rom = Some(filename.clone());
                                                                    self.art_texture = None;
                                                                    self.screenshot = None;
                                                                    self.texture_handle = None;
                                                                }
-
-                                                               if response.double_clicked() && !self.mame_executables.is_empty() {
-                                                                   // Use preferred MAME or default
-                                                                   let mame_idx = self.game_preferred_mame.get(filename)
-                                                                   .copied()
-                                                                   .unwrap_or(self.selected_mame_index);
-                                                                   if let Some(mame) = self.mame_executables.get(mame_idx) {
-                                                                       launch_rom_with_mame(filename, &self.rom_dirs, &self.extra_rom_dirs, &mame.path);
-                                                                   }
+                                                               if response.double_clicked() {
+                                                                   launch_rom(filename, &self.rom_dirs, &self.extra_rom_dirs, &self.mame_executable);
                                                                }
-
-                                                               // Handle right-click for context menu
-                                                               response.context_menu(|ui| {
-                                                                   ui.label("Launch with:");
-                                                                   ui.separator();
-
-                                                                   for (idx, mame) in self.mame_executables.iter().enumerate() {
-                                                                       if ui.button(&mame.name).clicked() {
-                                                                           launch_rom_with_mame(filename, &self.rom_dirs, &self.extra_rom_dirs, &mame.path);
-                                                                           self.game_preferred_mame.insert(filename.clone(), idx);
-                                                                           ui.close_menu();
-                                                                       }
-                                                                   }
-                                                               });
-
                                                                ui.add_sized([100.0, row_height], egui::Label::new(filename));
                                                                ui.add_sized([60.0, row_height], egui::Label::new(year));
                                                                ui.add_sized([200.0, row_height], egui::Label::new(manuf));
@@ -1246,15 +1036,7 @@ impl eframe::App for MyApp {
             ui.horizontal(|ui| {
                 if ui.button("Launch Selected ROM").clicked() {
                     if let Some(rom_name) = &self.selected_rom {
-                        if !self.mame_executables.is_empty() {
-                            // Use preferred MAME or default
-                            let mame_idx = self.game_preferred_mame.get(rom_name)
-                            .copied()
-                            .unwrap_or(self.selected_mame_index);
-                            if let Some(mame) = self.mame_executables.get(mame_idx) {
-                                launch_rom_with_mame(rom_name, &self.rom_dirs, &self.extra_rom_dirs, &mame.path);
-                            }
-                        }
+                        launch_rom(rom_name, &self.rom_dirs, &self.extra_rom_dirs, &self.mame_executable);
                     }
                 }
 

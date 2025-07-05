@@ -1,0 +1,351 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -17,6 +17,9 @@ image = { version = "0.24.3", default-features = false, features = ["png"] } # A
+ rayon = "1.7"
+ tokio = { version = "1", features = ["full"] }
+ zip = "0.6"
+ winit = "0.30.11"
++serde = { version = "1.0", features = ["derive"] }
++serde_json = "1.0"
++dirs = "5.0"
+ 
+ # Add this if you need to specify features
+ [features]
+
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -8,6 +8,8 @@ use eframe::egui::TextureOptions; // Import TextureOptions
+ use std::thread;
+ use std::sync::mpsc;
+ use rayon::prelude::*;
++use serde::{Serialize, Deserialize};
++use std::fs;
+ 
+ #[derive(Clone, Debug, Default)]
+ pub struct GameMetadata {
+@@ -19,6 +21,9 @@ pub struct GameMetadata {
+     pub is_device: bool,
+     pub is_bios: bool,
+     pub is_mechanical: bool,
+     pub runnable: bool,
++    pub min_mame_version: Option<String>,
++    pub max_mame_version: Option<String>,
++    pub preferred_mame_profile: Option<String>,
+ }
+ 
+ #[derive(PartialEq, Eq, Clone, Copy)]
+@@ -43,6 +48,18 @@ pub struct FilterSettings {
+     pub hide_casino: bool,
+ }
+ 
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
++pub struct MameProfile {
++    pub name: String,
++    pub executable_path: String,
++    pub version: String,
++}
++
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
++pub struct GamePreference {
++    pub rom_name: String,
++    pub preferred_mame_profile: String,
++}
++
+ pub struct MyApp {
+     pub mame_executable: String,
+     pub rom_dirs: Vec<PathBuf>,
+@@ -63,6 +80,11 @@ pub struct MyApp {
+     pub total_games_count: usize,
+     pub working_games_count: usize,
+     pub mame_version: String,
++    pub mame_profiles: Vec<MameProfile>,
++    pub current_mame_profile: usize,
++    pub game_preferences: HashMap<String, GamePreference>,
++    pub show_mame_profiles_window: bool,
++    pub config_path: PathBuf,
+ }
+ 
+ impl Default for MyApp {
+@@ -89,6 +111,16 @@ impl Default for MyApp {
+             total_games_count: 0,
+             working_games_count: 0,
+             mame_version: String::new(),
++            mame_profiles: vec![],
++            current_mame_profile: 0,
++            game_preferences: HashMap::new(),
++            show_mame_profiles_window: false,
++            config_path: dirs::config_dir()
++                .unwrap_or_else(|| PathBuf::from("."))
++                .join("rust-mame-launcher"),
+         }
+     }
+ }
+@@ -299,10 +331,72 @@ fn launch_rom(rom: &str, rom_dirs: &[PathBuf], extra_dirs: &[PathBuf], mame_exe
+     .spawn();
+ }
+ 
++fn launch_rom_with_profile(rom: &str, rom_dirs: &[PathBuf], extra_dirs: &[PathBuf], app: &MyApp) {
++    let mame_executable = app.get_mame_for_game(rom);
++    println!("Launching ROM: {} with MAME: {}", rom, mame_executable);
++    
++    let all_dirs = rom_dirs.iter().chain(extra_dirs.iter());
++    let separator = ";";
++    let rom_paths = all_dirs
++        .map(|p| p.to_string_lossy())
++        .collect::<Vec<_>>()
++        .join(separator);
++        
++    let _ = Command::new(mame_executable)
++        .arg(rom)
++        .arg("-rompath")
++        .arg(rom_paths)
++        .spawn();
++}
++
+ impl eframe::App for MyApp {
+     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
++        // Load config on first run
++        ctx.memory_mut(|mem| {
++            if !mem.data.contains::<bool>("config_loaded") {
++                let _ = self.load_config();
++                mem.data.insert("config_loaded", true);
++            }
++        });
++        
+         // ---- Menu Bar ----
+         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+             egui::menu::bar(ui, |ui| {
+                 // File Menu
+                 ui.menu_button("File", |ui| {
++                    ui.menu_button("MAME Executables", |ui| {
++                        // Show current profiles
++                        for (idx, profile) in self.mame_profiles.iter().enumerate() {
++                            let is_current = idx == self.current_mame_profile;
++                            let label = if is_current {
++                                format!("✓ {} ({})", profile.name, profile.version)
++                            } else {
++                                format!("  {} ({})", profile.name, profile.version)
++                            };
++                            
++                            if ui.selectable_label(is_current, label).clicked() {
++                                self.current_mame_profile = idx;
++                                self.mame_executable = profile.executable_path.clone();
++                                self.mame_version = profile.version.clone();
++                                // Could trigger ROM reload here if needed
++                            }
++                        }
++                        
++                        ui.separator();
++                        
++                        if ui.button("Add MAME Version...").clicked() {
++                            if let Some(path) = rfd::FileDialog::new().pick_file() {
++                                if let Some(path_str) = path.to_str() {
++                                    let version = get_mame_version(path_str);
++                                    let name = format!("MAME {}", version.split_whitespace().nth(1).unwrap_or("Unknown"));
++                                    
++                                    self.mame_profiles.push(MameProfile {
++                                        name,
++                                        executable_path: path_str.to_string(),
++                                        version,
++                                    });
++                                    let _ = self.save_config();
++                                }
++                            }
++                            ui.close_menu();
++                        }
++                        
++                        if ui.button("Manage Profiles...").clicked() {
++                            self.show_mame_profiles_window = true;
++                            ui.close_menu();
++                        }
++                    });
++                    
++                    ui.separator();
++                    
+                     if ui.button("Set MAME Executable...").clicked() {
+                         let file_dialog = if cfg!(target_os = "linux") {
+                             // On Linux, don't filter by extension
+@@ -446,6 +544,62 @@ impl eframe::App for MyApp {
+                 });
+         }
++        
++        // ---- MAME Profile Manager Window ----
++        if self.show_mame_profiles_window {
++            egui::Window::new("MAME Profile Manager")
++                .collapsible(false)
++                .resizable(true)
++                .show(ctx, |ui| {
++                    ui.heading("MAME Profiles");
++                    
++                    egui::Grid::new("mame_profiles_grid")
++                        .striped(true)
++                        .show(ui, |ui| {
++                            ui.label("Profile Name");
++                            ui.label("Version");
++                            ui.label("Path");
++                            ui.label("Actions");
++                            ui.end_row();
++                            
++                            let mut to_remove = None;
++                            
++                            for (idx, profile) in self.mame_profiles.iter_mut().enumerate() {
++                                ui.text_edit_singleline(&mut profile.name);
++                                ui.label(&profile.version);
++                                ui.label(&profile.executable_path);
++                                
++                                if ui.button("Remove").clicked() {
++                                    to_remove = Some(idx);
++                                }
++                                ui.end_row();
++                            }
++                            
++                            if let Some(idx) = to_remove {
++                                self.mame_profiles.remove(idx);
++                                if self.current_mame_profile >= self.mame_profiles.len() {
++                                    self.current_mame_profile = 0;
++                                }
++                            }
++                        });
++                    
++                    ui.separator();
++                    
++                    ui.horizontal(|ui| {
++                        if ui.button("Save").clicked() {
++                            let _ = self.save_config();
++                            self.show_mame_profiles_window = false;
++                        }
++                        
++                        if ui.button("Cancel").clicked() {
++                            self.show_mame_profiles_window = false;
++                        }
++                    });
++                });
++        }
+ 
+         // ---- Right-side Artwork Panel ----
+         egui::SidePanel::right("artwork_panel")
+@@ -509,6 +663,32 @@ impl eframe::App for MyApp {
+                     ui.label(format!("Year: {}", meta.year));
+                     ui.label(format!("Manufacturer: {}", meta.manufacturer));
+                     ui.label(format!("Controls: {}", meta.controls));
++                    
++                    ui.separator();
++                    
++                    // Show MAME version preference
++                    ui.horizontal(|ui| {
++                        ui.label("MAME Version:");
++                        
++                        let current_pref = self.game_preferences.get(selected_rom)
++                            .map(|p| p.preferred_mame_profile.as_str())
++                            .unwrap_or("Default");
++                        
++                        egui::ComboBox::from_label("")
++                            .selected_text(current_pref)
++                            .show_ui(ui, |ui| {
++                                if ui.selectable_label(current_pref == "Default", "Default").clicked() {
++                                    self.game_preferences.remove(selected_rom);
++                                    let _ = self.save_config();
++                                }
++                                
++                                for profile in &self.mame_profiles {
++                                    if ui.selectable_label(current_pref == &profile.name, &profile.name).clicked() {
++                                        self.game_preferences.insert(
++                                            selected_rom.clone(),
++                                            GamePreference {
++                                                rom_name: selected_rom.clone(),
++                                                preferred_mame_profile: profile.name.clone(),
++                                            }
++                                        );
++                                        let _ = self.save_config();
++                                    }
++                                }
++                            });
++                    });
+                 }
+             } else {
+                 ui.label("Select a game to see details.");
+@@ -951,7 +1131,7 @@ impl eframe::App for MyApp {
+                                 self.texture_handle = None;
+                             }
+                             if response.double_clicked() {
+-                                launch_rom(filename, &self.rom_dirs, &self.extra_rom_dirs, &self.mame_executable);
++                                launch_rom_with_profile(filename, &self.rom_dirs, &self.extra_rom_dirs, self);
+                             }
+                             ui.add_sized([100.0, row_height], egui::Label::new(filename));
+                             ui.add_sized([60.0, row_height], egui::Label::new(year));
+@@ -974,7 +1154,7 @@ impl eframe::App for MyApp {
+             ui.horizontal(|ui| {
+                 if ui.button("Launch Selected ROM").clicked() {
+                     if let Some(rom_name) = &self.selected_rom {
+-                        launch_rom(rom_name, &self.rom_dirs, &self.extra_rom_dirs, &self.mame_executable);
++                        launch_rom_with_profile(rom_name, &self.rom_dirs, &self.extra_rom_dirs, self);
+                     }
+                 }
+                 
+@@ -1029,6 +1209,59 @@ impl eframe::App for MyApp {
+     }
+ }
+ 
++impl MyApp {
++    fn save_config(&self) -> Result<(), Box<dyn std::error::Error>> {
++        std::fs::create_dir_all(&self.config_path)?;
++        
++        // Save MAME profiles
++        let profiles_path = self.config_path.join("mame_profiles.json");
++        let profiles_json = serde_json::to_string_pretty(&self.mame_profiles)?;
++        std::fs::write(profiles_path, profiles_json)?;
++        
++        // Save game preferences
++        let prefs_path = self.config_path.join("game_preferences.json");
++        let prefs_json = serde_json::to_string_pretty(&self.game_preferences)?;
++        std::fs::write(prefs_path, prefs_json)?;
++        
++        Ok(())
++    }
++    
++    fn load_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
++        // Load MAME profiles
++        let profiles_path = self.config_path.join("mame_profiles.json");
++        if profiles_path.exists() {
++            let profiles_json = std::fs::read_to_string(profiles_path)?;
++            self.mame_profiles = serde_json::from_str(&profiles_json)?;
++        }
++        
++        // Load game preferences
++        let prefs_path = self.config_path.join("game_preferences.json");
++        if prefs_path.exists() {
++            let prefs_json = std::fs::read_to_string(prefs_path)?;
++            self.game_preferences = serde_json::from_str(&prefs_json)?;
++        }
++        
++        // If we have profiles but no default MAME set, use the first profile
++        if !self.mame_profiles.is_empty() && self.mame_executable == "mame" {
++            self.mame_executable = self.mame_profiles[0].executable_path.clone();
++            self.mame_version = self.mame_profiles[0].version.clone();
++        }
++        
++        Ok(())
++    }
++    
++    fn get_mame_for_game(&self, rom_name: &str) -> &str {
++        // Check if game has a preferred MAME version
++        if let Some(pref) = self.game_preferences.get(rom_name) {
++            for profile in &self.mame_profiles {
++                if profile.name == pref.preferred_mame_profile {
++                    return &profile.executable_path;
++                }
++            }
++        }
++        
++        // Otherwise use current profile
++        if self.current_mame_profile < self.mame_profiles.len() {
++            &self.mame_profiles[self.current_mame_profile].executable_path
++        } else {
++            &self.mame_executable // Fallback to original
++        }
++    }
++}
++
+ fn main() -> Result<(), eframe::Error> {
+     // Load icon for the application
+     let icon_data = if let Ok(image) = image::open("assets/mame-frontend-icon.png") {

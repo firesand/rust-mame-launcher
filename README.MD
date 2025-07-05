@@ -127,6 +127,33 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [ ] Gamepad support
 - [ ] Custom themes
 
+## 🆕 What's New in v0.2.0
+
+### Multi-MAME Version Support
+- Manage multiple MAME installations from a single frontend
+- Per-game MAME version selection with right-click menu
+- Automatic preference memory for each game
+- Perfect for compatibility issues where games need specific MAME versions
+
+See the [Changelog](#changelog) for details.
+
+## Features
+
+- ✅ Multi-folder ROM management
+- ✅ **NEW: Multiple MAME version support**
+- ✅ Game artwork display (snapshots, cabinets, titles, artwork)
+- ✅ Advanced search and filtering
+- ✅ MAME metadata integration
+- ✅ Cross-platform support (Windows, Linux, macOS)
+
+## Usage
+
+### Managing Multiple MAME Versions (NEW!)
+1. Go to `File → MAME Executables Manager`
+2. Add your different MAME installations
+3. Set a default MAME version
+4. Right-click any game to choose which MAME version to use
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
