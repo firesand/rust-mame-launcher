@@ -1,21 +1,26 @@
 [package]
-name = "mame_gui"
-version = "0.2.0"
+name = "RMAMEUI"
+version = "0.3.0"
 edition = "2021"
+authors = ["Edo Hikmahtiar"]
+description = "RMAMEUI - A modern MAME frontend built with Rust"
 
 [dependencies]
 eframe = "0.31.1"
-egui_extras = { version = "0.31.1", features = ["image"] }
-egui_glow = "0.31.1"
-rfd = "0.13"
-walkdir = "2.5"
-quick-xml = { version = "0.31", features = ["serialize"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_derive = "1.0"
+egui = "0.31.1"
+egui_extras = "0.31.1"  # Match your egui version
+image = { version = "0.25.6", features = ["png", "jpeg", "ico"] }
+rfd = "0.15.3"  # For file dialogs
+dirs = "6.0"  # For platform-specific directories
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
-dirs = "5.0"
-image = { version = "0.24.3", default-features = false, features = ["png"] } # Add this line
-rayon = "1.7"
-tokio = { version = "1", features = ["full"] }
-zip = "0.6"
-winit = "0.30.11"
+rayon = "1.10"  # For parallel processing
+zip = "4.3"  # For reading artwork ZIP files
+chrono = { version = "0.4.41", features = ["serde"] } # For date/time handling
+quick-xml = "0.38"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
