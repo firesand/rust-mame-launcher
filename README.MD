@@ -1,4 +1,4 @@
-# Rust MAME Launcher
+# RMAMEUI - Rust MAME Launcher
 
 A modern MAME frontend built with Rust
 
